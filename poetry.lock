@@ -178,6 +178,53 @@ tests = ["cloudpickle ; platform_python_implementation == \"CPython\"", "hypothe
 tests-mypy = ["mypy (>=1.11.1) ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\"", "pytest-mypy-plugins ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\""]
 
 [[package]]
+name = "catboost"
+version = "1.2.8"
+description = "CatBoost Python Package"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "catboost-1.2.8-cp310-cp310-macosx_11_0_universal2.whl", hash = "sha256:8409c8a2e547469070d73681aa615b5e0b0d78367203d201b2f2b25c33cdcbad"},
+    {file = "catboost-1.2.8-cp310-cp310-manylinux2014_aarch64.whl", hash = "sha256:063020755d21de4f5434663a9b1d7cc1507c5b9254e2e8cd9cce9cd3b9ba4bbe"},
+    {file = "catboost-1.2.8-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:5ac7c03a619d8eb86d70ec5748c1c9f09d4085033e3a760bf2f7c2892513c8a8"},
+    {file = "catboost-1.2.8-cp310-cp310-win_amd64.whl", hash = "sha256:b661840dc65e6ab4e62484dbf1556fed7736bb9196c6b5a3abb003cea39f0f91"},
+    {file = "catboost-1.2.8-cp311-cp311-macosx_11_0_universal2.whl", hash = "sha256:29526147f37aa356b94bd06513cf36ebcd5a83a9186cee25a8223b104c016b9b"},
+    {file = "catboost-1.2.8-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:af140777a4062aabb4aed6731aee0737c6137dcdd5f7354b5d3b11033c1586ae"},
+    {file = "catboost-1.2.8-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:810e00c9b570d449ebb2406183b9e1f8b8ce275b4eedeba750b24f088932264b"},
+    {file = "catboost-1.2.8-cp311-cp311-win_amd64.whl", hash = "sha256:8985dd217fe79161b05ed251c5f8a18130e2330d5c77559ac91b99b0cf781e6b"},
+    {file = "catboost-1.2.8-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:29f93b4a89ef807e74c16882623c89f1fb781346e1f4fafb29b6949ab4603e14"},
+    {file = "catboost-1.2.8-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:932542f8b416b43ee07f912a9a964635ccca7397da16b61475c76ae4ae96a1df"},
+    {file = "catboost-1.2.8-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:35a70d32809a21d06dc0ba161bafdd0450ea71fe176a12ee85d7535883b22624"},
+    {file = "catboost-1.2.8-cp312-cp312-win_amd64.whl", hash = "sha256:319086796084fee5e4254300dc81aad1ae0b201cb576a9e87e6c7d030483be7e"},
+    {file = "catboost-1.2.8-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:777987e1483824f93b9cb904860ef46dfb3cd184f879e47413bc7163b9514830"},
+    {file = "catboost-1.2.8-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:a72681c50cbfe2fa4a6f85934bc707e0f7ff50a10a51801317418adf09d57cef"},
+    {file = "catboost-1.2.8-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:8d2b58781c7ff2f974bde857da0d10d867366979193a4e7052746330a8b76b55"},
+    {file = "catboost-1.2.8-cp313-cp313-win_amd64.whl", hash = "sha256:9c04ab1df71501d75cad80757f33d60bab2704b2450401d2c8cf3f3bcb6bd9f8"},
+    {file = "catboost-1.2.8-cp38-cp38-macosx_11_0_universal2.whl", hash = "sha256:54677216e1fef3abfafd62b6dcb9dd151a31cb77b28bc399cff9386287d064cb"},
+    {file = "catboost-1.2.8-cp38-cp38-manylinux2014_aarch64.whl", hash = "sha256:0cc4b735c641011f4c4a10c8113619fe2407866ee33b0d37fd53d9f52fab6cff"},
+    {file = "catboost-1.2.8-cp38-cp38-manylinux2014_x86_64.whl", hash = "sha256:c27ed511bbcd78256cbe7de94ba7f2141d8fc3f95e6fa8f66c190f03f80fdac5"},
+    {file = "catboost-1.2.8-cp38-cp38-win_amd64.whl", hash = "sha256:b639da2386c364e2db52f11ade3335fbde11e139ba79bb47a34cb320d236c95b"},
+    {file = "catboost-1.2.8-cp39-cp39-macosx_11_0_universal2.whl", hash = "sha256:f486ae782a8a91b94e697f75270f5d6da53ab35ee55730a8787643d6be6dd8ef"},
+    {file = "catboost-1.2.8-cp39-cp39-manylinux2014_aarch64.whl", hash = "sha256:910d2596f114a073cb33a145f6114ffb5455b07581a29ec49f67d148cce52999"},
+    {file = "catboost-1.2.8-cp39-cp39-manylinux2014_x86_64.whl", hash = "sha256:9950130cac0a2a9c806386eb98c996d62bdedd638453082bb21a50bf11bf5e27"},
+    {file = "catboost-1.2.8-cp39-cp39-win_amd64.whl", hash = "sha256:a2b59f01c9b1631b8be03637bb7d48a4b1ef657c5d797ad0a9eba40e2be7c4cd"},
+    {file = "catboost-1.2.8.tar.gz", hash = "sha256:4a1d1aca5caecd919ec476f72c7abd98a704c24fda35506d4d7d71f77f07cb29"},
+]
+
+[package.dependencies]
+graphviz = "*"
+matplotlib = "*"
+numpy = ">=1.16.0,<3.0"
+pandas = ">=0.24"
+plotly = "*"
+scipy = "*"
+six = "*"
+
+[package.extras]
+widget = ["ipython", "ipywidgets (>=7.0,<9.0)", "traitlets"]
+
+[[package]]
 name = "certifi"
 version = "2025.1.31"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -333,7 +380,7 @@ description = "Cross-platform colored terminal text."
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 groups = ["main"]
-markers = "platform_system == \"Windows\""
+markers = "platform_system == \"Windows\" or sys_platform == \"win32\""
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
@@ -806,6 +853,23 @@ spark = ["pyspark (>=3.1.1)"]
 sql = ["fugue-sql-antlr (>=0.2.0)", "jinja2", "qpd (>=0.4.4)", "sqlglot"]
 
 [[package]]
+name = "graphviz"
+version = "0.20.3"
+description = "Simple Python interface for Graphviz"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "graphviz-0.20.3-py3-none-any.whl", hash = "sha256:81f848f2904515d8cd359cc611faba817598d2feaac4027b266aa3eda7b3dde5"},
+    {file = "graphviz-0.20.3.zip", hash = "sha256:09d6bc81e6a9fa392e7ba52135a9d49f1ed62526f96499325930e87ca1b5925d"},
+]
+
+[package.extras]
+dev = ["flake8", "pep8-naming", "tox (>=3)", "twine", "wheel"]
+docs = ["sphinx (>=5,<7)", "sphinx-autodoc-typehints", "sphinx-rtd-theme"]
+test = ["coverage", "pytest (>=7,<8.1)", "pytest-cov", "pytest-mock (>=3)"]
+
+[[package]]
 name = "holidays"
 version = "0.71"
 description = "Open World Holidays Framework"
@@ -854,6 +918,18 @@ doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linke
 enabler = ["pytest-enabler (>=2.2)"]
 test = ["jaraco.test (>=5.4)", "pytest (>=6,!=8.1.*)", "zipp (>=3.17)"]
 type = ["pytest-mypy"]
+
+[[package]]
+name = "iniconfig"
+version = "2.1.0"
+description = "brain-dead simple config-ini parsing"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "iniconfig-2.1.0-py3-none-any.whl", hash = "sha256:9deba5723312380e77435581c6bf4935c94cbfab9b1ed33ef8d238ea168eb760"},
+    {file = "iniconfig-2.1.0.tar.gz", hash = "sha256:3abbd2e30b36733fee78f9c7f7308f2d0050e88f0087fd25c2645f63c773e1c7"},
+]
 
 [[package]]
 name = "jinja2"
@@ -1883,6 +1959,22 @@ packaging = "*"
 express = ["numpy"]
 
 [[package]]
+name = "pluggy"
+version = "1.5.0"
+description = "plugin and hook calling mechanisms for python"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "pluggy-1.5.0-py3-none-any.whl", hash = "sha256:44e1ad92c8ca002de6377e165f3e0f1be63266ab4d554740532335b9d75ea669"},
+    {file = "pluggy-1.5.0.tar.gz", hash = "sha256:2cffa88e94fdc978c4c574f15f9e59b7f4201d439195c3715ca9e2486f1d0cf1"},
+]
+
+[package.extras]
+dev = ["pre-commit", "tox"]
+testing = ["pytest", "pytest-benchmark"]
+
+[[package]]
 name = "propcache"
 version = "0.3.1"
 description = "Accelerated property cache"
@@ -2126,6 +2218,27 @@ files = [
 
 [package.extras]
 diagrams = ["jinja2", "railroad-diagrams"]
+
+[[package]]
+name = "pytest"
+version = "8.3.5"
+description = "pytest: simple powerful testing with Python"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "pytest-8.3.5-py3-none-any.whl", hash = "sha256:c69214aa47deac29fad6c2a4f590b9c4a9fdb16a403176fe154b79c0b4d4d820"},
+    {file = "pytest-8.3.5.tar.gz", hash = "sha256:f4efe70cc14e511565ac476b57c279e12a855b11f48f212af1080ef2263d3845"},
+]
+
+[package.dependencies]
+colorama = {version = "*", markers = "sys_platform == \"win32\""}
+iniconfig = "*"
+packaging = "*"
+pluggy = ">=1.5,<2"
+
+[package.extras]
+dev = ["argcomplete", "attrs (>=19.2)", "hypothesis (>=3.56)", "mock", "pygments (>=2.7.2)", "requests", "setuptools", "xmlschema"]
 
 [[package]]
 name = "python-dateutil"
@@ -2928,6 +3041,49 @@ files = [
 ]
 
 [[package]]
+name = "u8darts"
+version = "0.35.0"
+description = "A python library for easy manipulation and forecasting of time series."
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "u8darts-0.35.0-py3-none-any.whl", hash = "sha256:1b1bd6d528963c41c9624279877fc0a52ba48a1e383d0711081c6581eac53fc1"},
+    {file = "u8darts-0.35.0.tar.gz", hash = "sha256:6736515940737cf4a72f671129ff094317000dc1c39844b03e013e0bdb8f665f"},
+]
+
+[package.dependencies]
+catboost = {version = ">=1.0.6", optional = true, markers = "extra == \"all\""}
+holidays = ">=0.11.1"
+joblib = ">=0.16.0"
+lightgbm = {version = ">=3.2.0", optional = true, markers = "extra == \"all\""}
+matplotlib = ">=3.3.0"
+narwhals = ">=1.25.1"
+nfoursid = ">=1.0.0"
+numpy = ">=1.19.0"
+pandas = ">=1.0.5"
+prophet = {version = ">=1.1.1", optional = true, markers = "extra == \"all\""}
+pyod = ">=0.9.5"
+pytorch-lightning = {version = ">=1.5.0", optional = true, markers = "extra == \"all\""}
+requests = ">=2.22.0"
+scikit-learn = ">=1.6.0"
+scipy = ">=1.3.2"
+shap = ">=0.40.0"
+statsforecast = ">=1.4"
+statsmodels = ">=0.14.0"
+tensorboardX = {version = ">=2.1", optional = true, markers = "extra == \"all\""}
+torch = {version = ">=1.8.0", optional = true, markers = "extra == \"all\""}
+tqdm = ">=4.60.0"
+typing-extensions = "*"
+xarray = ">=0.17.0"
+xgboost = ">=2.1.4"
+
+[package.extras]
+all = ["catboost (>=1.0.6)", "holidays (>=0.11.1)", "joblib (>=0.16.0)", "lightgbm (>=3.2.0)", "matplotlib (>=3.3.0)", "narwhals (>=1.25.1)", "nfoursid (>=1.0.0)", "numpy (>=1.19.0)", "pandas (>=1.0.5)", "prophet (>=1.1.1)", "pyod (>=0.9.5)", "pytorch-lightning (>=1.5.0)", "requests (>=2.22.0)", "scikit-learn (>=1.6.0)", "scipy (>=1.3.2)", "shap (>=0.40.0)", "statsforecast (>=1.4)", "statsmodels (>=0.14.0)", "tensorboardX (>=2.1)", "torch (>=1.8.0)", "tqdm (>=4.60.0)", "typing-extensions", "xarray (>=0.17.0)", "xgboost (>=2.1.4)"]
+notorch = ["catboost (>=1.0.6)", "lightgbm (>=3.2.0)", "prophet (>=1.1.1)"]
+torch = ["pytorch-lightning (>=1.5.0)", "tensorboardX (>=2.1)", "torch (>=1.8.0)"]
+
+[[package]]
 name = "urllib3"
 version = "2.4.0"
 description = "HTTP library with thread-safe connection pooling, file post, and more."
@@ -3145,4 +3301,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "34a1a799b597c77c2315c35485a65da5973d5d8d137ebdc386b3c5b24faa1034"
+content-hash = "b400cbbb908e973f197cada89fc6dc3b88d39f92c8ca3793a293d6e5097a94db"
