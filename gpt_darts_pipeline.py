@@ -100,12 +100,16 @@ model_classes = {
     ),
     'ARIMA': (ARIMA, {'p':[1,2], 'd':[0,1], 'q':[1,2]}),
     'Theta': (Theta, {}),
-    'Prophet': (Prophet, {}),
-    'LightGBM': (LightGBMModel, {'lags':[12,30], 'output_chunk_length':[7]}),
-    'CatBoost': (CatBoostModel, {'lags':[12,30], 'output_chunk_length':[7]}),
-    'TCN': (TCNModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[100]}),
-    'NBEATS': (NBEATSModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[100]}),
-    'TFT': (TFTModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[50], 'add_relative_index': [True]}),
+    'Prophet': (Prophet, {
+        'country_holidays': ['BR'], 
+        'seasonality_mode': ["additive", "multiplicative"],
+        'suppress_stdout_stderror': [True]
+    }),	
+    # 'LightGBM': (LightGBMModel, {'lags':[12,30], 'output_chunk_length':[7]}),
+    # 'CatBoost': (CatBoostModel, {'lags':[12,30], 'output_chunk_length':[7]}),
+    # 'TCN': (TCNModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[100]}),
+    # 'NBEATS': (NBEATSModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[100]}),
+    # 'TFT': (TFTModel, {'input_chunk_length':[30], 'output_chunk_length':[14], 'n_epochs':[50], 'add_relative_index': [True]}),
 }
 
 # 4. Hyperparameter tuning

@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import warnings
 import time
 import sys
 import io
@@ -14,12 +13,13 @@ from sklearn.exceptions import ConvergenceWarning
 import torch
 import torch.nn as nn
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, PowerTransformer, RobustScaler
 
 from sktime.forecasting.model_selection import temporal_train_test_split, ForecastingGridSearchCV
 from sktime.forecasting.base import ForecastingHorizon
 from sktime.forecasting.compose import TransformedTargetForecaster, make_reduction
 from sktime.transformations.compose import OptionalPassthrough
+from sktime.transformations.series.adapt import TabularToSeriesAdaptor
 from sktime.transformations.series.detrend import Deseasonalizer, Detrender
 from sktime.split import SlidingWindowSplitter
 from sktime.utils.plotting import plot_series, plot_windows
@@ -27,6 +27,7 @@ from sktime.performance_metrics.forecasting import mean_absolute_percentage_erro
 
 # Import forecasting models
 from sktime.forecasting.naive import NaiveForecaster
+from sktime.forecasting.darts import DartsRegressionModel, DartsXGBModel, DartsLinearRegressionModel
 from sklearn.linear_model import LinearRegression
 from sktime.forecasting.ets import AutoETS
 from sktime.forecasting.statsforecast import StatsForecastAutoARIMA
@@ -34,9 +35,14 @@ from sktime.forecasting.tbats import TBATS
 from sktime.forecasting.trend import PolynomialTrendForecaster
 from sktime.forecasting.statsforecast import StatsForecastAutoTheta
 from sktime.forecasting.fbprophet import Prophet
+from sktime.forecasting.neuralforecast import NeuralForecastLSTM, NeuralForecastTCN
 from sktime.forecasting.compose import make_reduction
 from sklearn.neural_network import MLPRegressor
 from sktime.forecasting.compose import EnsembleForecaster
+
+import warnings
+# Suppress feature name mismatch warnings from TBATS
+warnings.filterwarnings("ignore", message=".*force_all_finite.*", category=FutureWarning)  #RuntimeWarning, UserWarning, FutureWarning
 
 # internal imports
 # from lstm_forecaster import LSTMForecaster
@@ -74,7 +80,22 @@ def create_model_configs():
             "forecaster": NaiveForecaster(),
             "params": {
                 "forecaster__strategy": ["last", "mean", "drift"],
-                "deseasonalize__passthrough": [True, False],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
+                "detrend__passthrough": [True, False],
+            }
+        },
+        {
+            "name": "OLS",
+            "forecaster": DartsRegressionModel(),
+            "params": {
+                "forecaster__estimator__lags": [1, 2, 7, 14, 28],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
                 "detrend__passthrough": [True, False],
             }
         },
@@ -87,26 +108,32 @@ def create_model_configs():
             ),
             "params": {
                 "forecaster__estimator__fit_intercept": [True, False],
-                "deseasonalize__passthrough": [True, False],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
                 "detrend__passthrough": [True, False],
             }
         },
-        {
-            "name": "Prophet",
-            "forecaster": Prophet(
-                seasonality_mode='multiplicative',  # Handle multiplicative seasonality
-                weekly_seasonality=True,  # Enable weekly seasonality
-                daily_seasonality=True,   # Enable daily seasonality
-                yearly_seasonality=True,  # Enable yearly seasonality
-                uncertainty_samples=1000  # Number of samples for uncertainty intervals
-            ),
-            "params": {
-                "forecaster__changepoint_prior_scale": [0.05, 0.5],  # Flexibility of trend
-                "forecaster__seasonality_prior_scale": [0.1, 1.0],   # Flexibility of seasonality
-                "deseasonalize__passthrough": [True],    # Let Prophet handle seasonality
-                "detrend__passthrough": [True],         # Let Prophet handle trend
-            }
-        },
+        # {
+        #     "name": "Prophet",
+        #     "forecaster": Prophet(
+        #         seasonality_mode='multiplicative',  # Handle multiplicative seasonality
+        #         uncertainty_samples=1000  # Number of samples for uncertainty intervals
+        #     ),
+        #     "params": {
+        #         "forecaster__changepoint_prior_scale": [0.05, 0.5],  # Flexibility of trend
+        #         "forecaster__seasonality_prior_scale": [0.1, 1.0],   # Flexibility of seasonality
+        #         "forecaster__daily_seasonality": [True, False],
+        #         "forecaster__weekly_seasonality": [True, False],
+        #         "forecaster__yearly_seasonality": [True, False],
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True],         # Let Prophet handle trend
+        #     }
+        # },
         {
             "name": "AutoETS",
             "forecaster": AutoETS(),
@@ -115,36 +142,48 @@ def create_model_configs():
                 "forecaster__error": ["add"],
                 "forecaster__trend": ["add", None],
                 "forecaster__seasonal": ["add", None],
-                "deseasonalize__passthrough": [True],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
                 "detrend__passthrough": [True],
             }
         },
-        # {
-        #     "name": "TBATS",
-        #     "forecaster": TBATS(sp=7),  # Weekly seasonality
-        #     "params": {
-        #         "forecaster__use_box_cox": [True, False],
-        #         "deseasonalize__passthrough": [True],
-        #         "detrend__passthrough": [True],
-        #     }
-        # },
-        # {
-        #     "name": "StatsForecastAutoARIMA",
-        #     "forecaster": StatsForecastAutoARIMA(
-        #         seasonal=True,
-        #         stepwise=True,
-        #         method='lbfgs',  # Use L-BFGS-B optimizer
-        #     ),
-        #     "params": {
-        #         "deseasonalize__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
+        {
+            "name": "TBATS",
+            "forecaster": TBATS(sp=7),  # Weekly seasonality
+            "params": {
+                "forecaster__use_box_cox": [True, False],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
+                "detrend__passthrough": [True],
+            }
+        },
+        {
+            "name": "StatsForecastAutoARIMA",
+            "forecaster": StatsForecastAutoARIMA(
+                seasonal=True,
+                stepwise=True,
+                method='lbfgs',  # Use L-BFGS-B optimizer
+            ),
+            "params": {
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
+                "detrend__passthrough": [True, False],
+            }
+        },
         {
             "name": "StatsForecastAutoTheta",
             "forecaster": StatsForecastAutoTheta(season_length=7),  # Weekly seasonality
             "params": {
-                "deseasonalize__passthrough": [True, False],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
                 "detrend__passthrough": [True, False],
             }
         },
@@ -153,7 +192,10 @@ def create_model_configs():
             "forecaster": PolynomialTrendForecaster(degree=2),  # Quadratic trend
             "params": {
                 "forecaster__degree": [1, 2, 3],  # Linear, quadratic, cubic
-                "deseasonalize__passthrough": [False],  # Always use deseasonalization
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [False],
+                "deseasonalize_365__passthrough": [False],
                 "detrend__passthrough": [True],
             }
         },
@@ -173,10 +215,66 @@ def create_model_configs():
             "params": {
                 "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
                 "forecaster__estimator__batch_size": [32, 64],
-                "deseasonalize__passthrough": [True, False],
+                "minmax__passthrough": [False],
+                "scaler__passthrough": [False],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
                 "detrend__passthrough": [True, False],
             }
         },
+        # {
+        #     "name": "TCN",
+        #     "forecaster": make_reduction(
+        #         NeuralForecastTCN(
+        #             input_size=28,  # default -1 (all history)
+        #             context_size=7, # default 10
+        #             decoder_layers=3, # default 2
+        #             max_steps=100, # default 1000
+        #             learning_rate=0.01, # default 0.001   between 0 and 1
+        #             batch_size=32, # default 32
+        #             optimizer="adam", # default "adam"
+        #             random_seed=42
+        #         ),
+        #         window_length=28,  # 4 weeks history
+        #         strategy="recursive"
+        #     ),
+        #     "params": {
+        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
+        #         "forecaster__estimator__batch_size": [32, 64],
+        #         "minmax__passthrough": [False],
+        #         "scaler__passthrough": [False],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
+        # {
+        #     "name": "LSTM",
+        #     "forecaster": make_reduction(
+        #         NeuralForecastLSTM(
+        #             input_size=28,  # default -1 (all history)
+        #             context_size=7, # default 10
+        #             encoder_n_layers=3, # default 2
+        #             decoder_layers=3, # default 2
+        #             max_steps=100, # default 1000
+        #             learning_rate=0.01, # default 0.001   between 0 and 1
+        #             batch_size=32, # default 32
+        #             optimizer="adam", # default "adam"
+        #             random_seed=42
+        #         ),
+        #         window_length=28,  # 4 weeks history
+        #         strategy="recursive"
+        #     ),
+        #     "params": {
+        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
+        #         "forecaster__estimator__batch_size": [32, 64],
+        #         "minmax__passthrough": [False],
+        #         "scaler__passthrough": [False],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
         # {
         #     "name": "LSTM",
         #     "forecaster": make_reduction(
@@ -195,7 +293,10 @@ def create_model_configs():
         #     #     # "forecaster__estimator__hidden_dim": [32, 64],
         #     #     # "forecaster__estimator__num_layers": [1, 2],
         #     #     "forecaster__estimator__dropout": [0.1, 0.2],
-        #     #     "deseasonalize__passthrough": [True, False],
+        #     #     "minmax__passthrough": [False],
+        #     #     "scaler__passthrough": [False],
+        #     #     "deseasonalize_7__passthrough": [True, False],
+        #     #     "deseasonalize_365__passthrough": [True, False],
         #     #     "detrend__passthrough": [True, False],
         #     # }
         # },
@@ -225,8 +326,11 @@ def find_best_models(y_train, y_test, models):
         
         # Create pipeline
         pipe = TransformedTargetForecaster([
-            ("deseasonalize", OptionalPassthrough(Deseasonalizer(sp=7))),
+            ("deseasonalize_7", OptionalPassthrough(Deseasonalizer(sp=7, model='multiplicative'))),
+            ("deseasonalize_365", OptionalPassthrough(Deseasonalizer(sp=365, model='multiplicative'))),
             ("detrend", OptionalPassthrough(Detrender())),
+            ("scaler", OptionalPassthrough(TabularToSeriesAdaptor(RobustScaler()))),
+            ("minmax", OptionalPassthrough(TabularToSeriesAdaptor(MinMaxScaler((1, 10))))),
             ("forecaster", model["forecaster"])
         ])
         
