@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.preprocessing import MinMaxScaler, PowerTransformer, RobustScaler
+from holidays import country_holidays, financial_holidays
 
 from sktime.forecasting.model_selection import temporal_train_test_split, ForecastingGridSearchCV
 from sktime.forecasting.base import ForecastingHorizon
@@ -21,6 +22,11 @@ from sktime.forecasting.compose import AutoEnsembleForecaster, TransformedTarget
 from sktime.transformations.compose import OptionalPassthrough
 from sktime.transformations.series.adapt import TabularToSeriesAdaptor
 from sktime.transformations.series.detrend import Deseasonalizer, Detrender
+from sktime.transformations.series.difference import Differencer
+from sktime.transformations.series.boxcox import LogTransformer
+from sktime.transformations.series.holiday import HolidayFeatures
+from sktime.transformations.series.date import DateTimeFeatures
+from sktime.transformations.series.dummies import SeasonalDummiesOneHot
 from sktime.split import SlidingWindowSplitter
 from sktime.utils.plotting import plot_series, plot_windows
 from sktime.performance_metrics.forecasting import mean_absolute_percentage_error
@@ -85,27 +91,23 @@ def create_model_configs():
                     ('Seas7', NaiveForecaster(strategy='mean', sp=7, window_length=364)),
                     ('Seas365', NaiveForecaster(strategy='mean', sp=365)),
                 ],
+                # test_size=0.9,
+                random_state=42,
+                n_jobs=-1
             ),
             "params": {
-                "minmax__passthrough": [True, False],
-                "scaler__passthrough": [True, False],
+                "minmax__passthrough": [True],
+                "scaler__passthrough": [True],
                 "deseasonalize_7__passthrough": [True],
                 "deseasonalize_365__passthrough": [True],
                 "detrend__passthrough": [True],
+                # "ln__passthrough": [False],
+                # "diff__passthrough": [False],
+                # "seas__passthrough": [False],
+                # "holidays__passthrough": [False],
+                # "calendar__passthrough": [False],
             }
         },
-        # {
-        #     "name": "OLS",
-        #     "forecaster": DartsRegressionModel(),
-        #     "params": {
-        #         "forecaster__estimator__lags": [1, 2, 7, 14, 28],
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
         {
             "name": "LinearRegression",
             "forecaster": make_reduction(
@@ -352,11 +354,38 @@ def find_best_models(y_train, y_test, models):
         
         # Create pipeline
         pipe = TransformedTargetForecaster([
-            ("deseasonalize_7", OptionalPassthrough(Deseasonalizer(sp=7, model='multiplicative'))),
-            ("deseasonalize_365", OptionalPassthrough(Deseasonalizer(sp=365, model='multiplicative'))),
+            ("ln", OptionalPassthrough(LogTransformer())),
+            # ("diff", OptionalPassthrough(Differencer(na_handling='drop_na'))),
+            ("deseasonalize_7", OptionalPassthrough(Deseasonalizer(sp=7))),
+            ("deseasonalize_365", OptionalPassthrough(Deseasonalizer(sp=365))),
             ("detrend", OptionalPassthrough(Detrender())),
             ("scaler", OptionalPassthrough(TabularToSeriesAdaptor(RobustScaler()))),
             ("minmax", OptionalPassthrough(TabularToSeriesAdaptor(MinMaxScaler((1, 10))))),
+            # ("seas", OptionalPassthrough(SeasonalDummiesOneHot())),
+            # ("holidays", OptionalPassthrough(TabularToSeriesAdaptor(HolidayFeatures(
+            #     calendar=country_holidays(country="BR"),
+            #     holiday_windows={
+            #         "Christmas": (5, 3), 
+            #         "New Year": (2, 5), 
+            #         "Carnival": (3, 3), 
+            #         "Good Friday": (2, 2),
+            #         "Tiradentes' Day": (2, 2),
+            #         "Worker's Day": (2, 2),
+            #         "Independence Day": (2, 2),
+            #         "Our Lady of Aparecida": (2, 2),
+            #         "All Souls' Day": (2, 2),
+            #         "Republic Proclamation Day": (2, 2),
+            #         "National Day of Zumbi and Black Awareness": (2, 2),
+            #     }
+            # )))),
+            # ("calendar", OptionalPassthrough(DateTimeFeatures(ts_freq="D", manual_selection=[
+            #     "month_of_year", 
+            #     "day_of_week", 
+            #     "day_of_month", 
+            #     "week_of_year", 
+            #     "day_of_year", 
+            #     'is_weekend'
+            # ]))),	
             ("forecaster", model["forecaster"])
         ])
         
@@ -411,7 +440,6 @@ def evaluate_stability(best_models, y, periods=6):
     for i in range(periods, 0, -1):
         cutoff = y.index.max() - relativedelta(months=i)  # Last month of data minus periods
         cutoffs.append(cutoff)
-    print(cutoffs)
     
     for model in best_models:
         print(f"\nEvaluating stability of {model['name']}...")
@@ -469,7 +497,7 @@ def plot_results(stability_results):
     sns.set_context("paper")
     
     # Create figure with adjusted size and DPI
-    fig = plt.figure(figsize=(15, 10), dpi=100)
+    fig = plt.figure(figsize=(17, 9), dpi=90)
     
     # Color palette
     colors = plt.cm.Set2(np.linspace(0, 1, len(stability_results)))
@@ -554,9 +582,7 @@ def plot_results(stability_results):
     plt.tight_layout()
     
     # Add a suptitle
-    fig.suptitle('Time Series Forecasting Model Comparison', 
-                 fontsize=16, 
-                 y=1.02)
+    fig.suptitle('Time Series Forecasting Model Comparison', fontsize=16, y=1.02)
     
 
     #### Add computation time analysis
@@ -584,7 +610,7 @@ def plot_results(stability_results):
     
     # Create and display timing analysis
     timing_df = pd.DataFrame(timing_data)
-    print("\nComputation Time and Cost Analysis (ml.m5.xlarge):\n")
+    print("\n\nComputation Time and Cost Analysis (ml.m5.xlarge):\n")
     print(timing_df.to_string(index=False))
     
     # # Add computation time plot
@@ -675,7 +701,7 @@ def plot_results(stability_results):
     plt.show()
     
     # Print summary statistics in a formatted table
-    print("\nStability Analysis Results:")
+    print("\n\nStability Analysis Results:")
     summary_data = {
         'Model': [],
         'Mean MAPE (%)': [],
