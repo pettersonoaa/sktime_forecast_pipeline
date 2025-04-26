@@ -17,7 +17,7 @@ from sklearn.preprocessing import MinMaxScaler, PowerTransformer, RobustScaler
 
 from sktime.forecasting.model_selection import temporal_train_test_split, ForecastingGridSearchCV
 from sktime.forecasting.base import ForecastingHorizon
-from sktime.forecasting.compose import TransformedTargetForecaster, make_reduction
+from sktime.forecasting.compose import AutoEnsembleForecaster, TransformedTargetForecaster, make_reduction
 from sktime.transformations.compose import OptionalPassthrough
 from sktime.transformations.series.adapt import TabularToSeriesAdaptor
 from sktime.transformations.series.detrend import Deseasonalizer, Detrender
@@ -41,8 +41,10 @@ from sklearn.neural_network import MLPRegressor
 from sktime.forecasting.compose import EnsembleForecaster
 
 import warnings
-# Suppress feature name mismatch warnings from TBATS
+# Suppress warnings from TBATS
 warnings.filterwarnings("ignore", message=".*force_all_finite.*", category=FutureWarning)  #RuntimeWarning, UserWarning, FutureWarning
+# Suppress warnings from ARIMA
+warnings.filterwarnings("ignore", message=".*possible convergence problem.*", category=UserWarning)  #RuntimeWarning, UserWarning, FutureWarning
 
 # internal imports
 # from lstm_forecaster import LSTMForecaster
@@ -59,46 +61,51 @@ def suppress_stdout_stderr():
         sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
-def create_daily_data(start_date='2022-01-01', end_date='2025-04-09'):
-    """Step 1: Create synthetic daily data with weekly patterns."""
-    daily_index = pd.date_range(start=start_date, end=end_date, freq='D')
-    
-    np.random.seed(42)
-    trend = np.linspace(100, 200, len(daily_index))
-    weekly = 20 * np.sin(2 * np.pi * np.arange(len(daily_index)) / 7)
-    noise = np.random.normal(0, 5, len(daily_index))
-    
-    values = trend + weekly + noise
-    data = pd.Series(values, index=daily_index, name='y')
-    return data
+def mape_month(y_true, y_pred):
+    y_true = y_true.groupby(y_true.index.month).sum().to_numpy()
+    y_pred = y_pred.groupby(y_pred.index.month).sum().to_numpy()
+    return np.mean(np.abs((y_true - y_pred) / y_true) * 100)
+
+def load_series(csv_path, time_col='date', value_col='value', freq='D'):
+    df = pd.read_csv(csv_path, usecols=[time_col, value_col], index_col=0, parse_dates=[time_col])
+    df = df.groupby(time_col)[value_col].sum().asfreq(freq)
+    series = pd.Series(df, index=df.index, name='y')
+    series = series.interpolate(method='time')
+    return series
 
 def create_model_configs():
     """Step 2: Define models and their parameter grids."""
     return [
         {
-            "name": "Naive",
-            "forecaster": NaiveForecaster(),
+            "name": f"Ensemble_Naive",
+            "forecaster": AutoEnsembleForecaster(
+                forecasters=[
+                    ('Level', NaiveForecaster(strategy='last')),
+                    ('Drift', NaiveForecaster(strategy='drift')),
+                    ('Seas7', NaiveForecaster(strategy='mean', sp=7, window_length=364)),
+                    ('Seas365', NaiveForecaster(strategy='mean', sp=365)),
+                ],
+            ),
             "params": {
-                "forecaster__strategy": ["last", "mean", "drift"],
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
+                "minmax__passthrough": [True, False],
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
             }
         },
-        {
-            "name": "OLS",
-            "forecaster": DartsRegressionModel(),
-            "params": {
-                "forecaster__estimator__lags": [1, 2, 7, 14, 28],
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
-            }
-        },
+        # {
+        #     "name": "OLS",
+        #     "forecaster": DartsRegressionModel(),
+        #     "params": {
+        #         "forecaster__estimator__lags": [1, 2, 7, 14, 28],
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
         {
             "name": "LinearRegression",
             "forecaster": make_reduction(
@@ -134,94 +141,95 @@ def create_model_configs():
         #         "detrend__passthrough": [True],         # Let Prophet handle trend
         #     }
         # },
-        {
-            "name": "AutoETS",
-            "forecaster": AutoETS(),
-            "params": {
-                "forecaster__sp": [7],
-                "forecaster__error": ["add"],
-                "forecaster__trend": ["add", None],
-                "forecaster__seasonal": ["add", None],
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True],
-                "deseasonalize_365__passthrough": [True],
-                "detrend__passthrough": [True],
-            }
-        },
-        {
-            "name": "TBATS",
-            "forecaster": TBATS(sp=7),  # Weekly seasonality
-            "params": {
-                "forecaster__use_box_cox": [True, False],
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True],
-            }
-        },
-        {
-            "name": "StatsForecastAutoARIMA",
-            "forecaster": StatsForecastAutoARIMA(
-                seasonal=True,
-                stepwise=True,
-                method='lbfgs',  # Use L-BFGS-B optimizer
-            ),
-            "params": {
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
-            }
-        },
-        {
-            "name": "StatsForecastAutoTheta",
-            "forecaster": StatsForecastAutoTheta(season_length=7),  # Weekly seasonality
-            "params": {
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
-            }
-        },
-        {
-            "name": "PolynomialTrend",
-            "forecaster": PolynomialTrendForecaster(degree=2),  # Quadratic trend
-            "params": {
-                "forecaster__degree": [1, 2, 3],  # Linear, quadratic, cubic
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [False],
-                "deseasonalize_365__passthrough": [False],
-                "detrend__passthrough": [True],
-            }
-        },
-        {
-            "name": "NeuralNet",
-            "forecaster": make_reduction(
-                MLPRegressor(
-                    # hidden_layer_sizes=(50,),
-                    max_iter=10000,
-                    early_stopping=True,
-                    # batch_size=32,
-                    random_state=42
-                ),
-                window_length=28,  # 4 weeks history
-                strategy="recursive"
-            ),
-            "params": {
-                "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
-                "forecaster__estimator__batch_size": [32, 64],
-                "minmax__passthrough": [False],
-                "scaler__passthrough": [False],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
-            }
-        },
+        # {
+        #     "name": "AutoETS",
+        #     "forecaster": AutoETS(),
+        #     "params": {
+        #         "forecaster__sp": [7],
+        #         "forecaster__error": ["add"],
+        #         "forecaster__trend": ["add", None],
+        #         "forecaster__seasonal": ["add", None],
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True],
+        #         "deseasonalize_365__passthrough": [True],
+        #         "detrend__passthrough": [True],
+        #     }
+        # },
+        # {
+        #     "name": "TBATS",
+        #     "forecaster": TBATS(sp=7),  # Weekly seasonality
+        #     "params": {
+        #         "forecaster__use_box_cox": [True, False],
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True],
+        #     }
+        # },
+        # {
+        #     "name": "StatsForecastAutoARIMA",
+        #     "forecaster": StatsForecastAutoARIMA(
+        #         seasonal=True,
+        #         stepwise=True,
+        #         method='lbfgs',  # Use L-BFGS-B optimizer
+        #     ),
+        #     "params": {
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
+        # {
+        #     "name": "StatsForecastAutoTheta",
+        ###     "forecaster": StatsForecastAutoTheta(season_length=7),  # Weekly seasonality
+        #     "forecaster": StatsForecastAutoTheta(),  # Weekly seasonality
+        #     "params": {
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
+        # {
+        #     "name": "PolynomialTrend",
+        #     "forecaster": PolynomialTrendForecaster(degree=2),  # Quadratic trend
+        #     "params": {
+        #         "forecaster__degree": [1, 2, 3],  # Linear, quadratic, cubic
+        #         "minmax__passthrough": [True],
+        #         "scaler__passthrough": [True],
+        #         "deseasonalize_7__passthrough": [False],
+        #         "deseasonalize_365__passthrough": [False],
+        #         "detrend__passthrough": [True],
+        #     }
+        # },
+        # {
+        #     "name": "NeuralNet",
+        #     "forecaster": make_reduction(
+        #         MLPRegressor(
+        #             # hidden_layer_sizes=(50,),
+        #             max_iter=10000,
+        #             early_stopping=True,
+        #             # batch_size=32,
+        #             random_state=42
+        #         ),
+        #         window_length=28,  # 4 weeks history
+        #         strategy="recursive"
+        #     ),
+        #     "params": {
+        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
+        #         "forecaster__estimator__batch_size": [32, 64],
+        #         "minmax__passthrough": [False],
+        #         "scaler__passthrough": [False],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
         # {
         #     "name": "TCN",
         #     "forecaster": make_reduction(
@@ -300,6 +308,24 @@ def create_model_configs():
         #     #     "detrend__passthrough": [True, False],
         #     # }
         # },
+        # {
+        #     "name": f"Ensemble_ETS_THETA_ARIMA",
+        #     "forecaster": AutoEnsembleForecaster(
+        #         forecasters=[
+        #             ('ETS', AutoETS()),
+        #             ('THETA', StatsForecastAutoTheta()),
+        #             ('ARIMA', StatsForecastAutoARIMA()),
+        #         ],
+        #     ),
+        #     "params": {
+        #         "minmax__passthrough": [True, False],
+        #         "scaler__passthrough": [True, False],
+        #         "deseasonalize_7__passthrough": [True, False],
+        #         "deseasonalize_365__passthrough": [True, False],
+        #         "detrend__passthrough": [True, False],
+        #     }
+        # },
+
     ]
 
 def find_best_models(y_train, y_test, models):
@@ -308,9 +334,9 @@ def find_best_models(y_train, y_test, models):
     
     # Create cross-validation strategy
     cv = SlidingWindowSplitter(
-        initial_window=28*12*2,    # 2 years training
-        window_length=28*12*1,     # 1 years validation
-        step_length=28,        # 1 month step
+        initial_window=28*12*3+28*6,    # 2 years training
+        window_length=28*12*3,     # 1 years validation
+        step_length=28*1,        # 1 month step
         fh=[1, 7, 14, 21, 28, 35]        # Forecast horizons
     )
     # Visualize the CV splits
@@ -344,24 +370,9 @@ def find_best_models(y_train, y_test, models):
         )
         
         try:
-            # Fit and predict
-            if model['name'] == 'Prophet':
-                with suppress_stdout_stderr():
-                    # Fit and predict for Prophet
-                    gscv.fit(y_train)
-                    y_pred = gscv.predict(ForecastingHorizon(y_test.index, is_relative=False))
-            elif model['name'] in ['NeuralNet', 'LSTM']:
-                with warnings.catch_warnings():
-                    # Fit and predict for NeuralNet
-                    warnings.filterwarnings('ignore', category=ConvergenceWarning)
-                    warnings.filterwarnings('ignore', message='.*Maximum iterations.*')
-                    warnings.filterwarnings('ignore', category=UserWarning)
-                    gscv.fit(y_train)
-                    y_pred = gscv.predict(ForecastingHorizon(y_test.index, is_relative=False))
-            else:
-                # Normal fitting for other models
-                gscv.fit(y_train)
-                y_pred = gscv.predict(ForecastingHorizon(y_test.index, is_relative=False))
+            # fitting 
+            gscv.fit(y_train)
+            y_pred = gscv.predict(ForecastingHorizon(y_test.index, is_relative=False))
             
             # Add debug print
             print(f"Model: {model['name']}")
@@ -391,10 +402,16 @@ def find_best_models(y_train, y_test, models):
         
     return best_models
 
-def evaluate_stability(best_models, y, periods=5):
+def evaluate_stability(best_models, y, periods=6):
     """Step 4: Calculate MAPE over multiple periods for stability."""
     stability_results = []
-    period_length = len(y) // (periods + 1)
+
+    from dateutil.relativedelta import relativedelta
+    cutoffs =[]
+    for i in range(periods, 0, -1):
+        cutoff = y.index.max() - relativedelta(months=i)  # Last month of data minus periods
+        cutoffs.append(cutoff)
+    print(cutoffs)
     
     for model in best_models:
         print(f"\nEvaluating stability of {model['name']}...")
@@ -403,26 +420,20 @@ def evaluate_stability(best_models, y, periods=5):
         pred_values = []  # Store predictions
         test_indices = []  # Store test period indices
         
-        for i in range(periods):
-            # Get data for this period
-            start_idx = i * period_length
-            end_idx = start_idx + period_length
-            y_period = y[start_idx:end_idx]
-            y_train, y_test = temporal_train_test_split(y_period, test_size=0.2)
+        for cutoff in cutoffs:
+
+            test_size = 28+7
+            train_start_date = cutoff - relativedelta(years=3, days=test_size) 
+            y_period = y[train_start_date:cutoff]
+            train_size = int(len(y_period)) - test_size
+            y_train, y_test = y_period[:train_size], y_period[train_size:]
             fh = ForecastingHorizon(y_test.index, is_relative=False)
             
             try:
-                # Suppress convergence warnings for ARIMA
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        'ignore', 
-                        message='possible convergence problem',
-                        category=UserWarning
-                    )
                 # Fit and predict
                 model['model'].fit(y_train)
                 y_pred = model['model'].predict(fh)
-                mape = mean_absolute_percentage_error(y_test, y_pred)
+                mape = mape_month(y_test, y_pred)
                 mape_scores.append(mape)
 
                 # Store actual and predicted values
@@ -430,9 +441,9 @@ def evaluate_stability(best_models, y, periods=5):
                 pred_values.append(y_pred)
                 test_indices.append(y_test.index)
 
-                print(f"Period {i+1} MAPE: {mape:.2f}%")
+                print(f"Period {cutoff.date()} MAPE: {mape:.2f}%")
             except Exception as e:
-                print(f"Error in period {i+1}: {str(e)}")
+                print(f"Error in period {cutoff.date()}: {str(e)}")
                 mape_scores.append(np.nan)
                 test_values.append(None)
                 pred_values.append(None)
@@ -458,7 +469,7 @@ def plot_results(stability_results):
     sns.set_context("paper")
     
     # Create figure with adjusted size and DPI
-    fig = plt.figure(figsize=(15, 12), dpi=100)
+    fig = plt.figure(figsize=(15, 10), dpi=100)
     
     # Color palette
     colors = plt.cm.Set2(np.linspace(0, 1, len(stability_results)))
@@ -494,6 +505,7 @@ def plot_results(stability_results):
     # Plot 2: Actual vs Predicted with enhanced styling
     ax2 = plt.subplot(2, 1, 2)
     
+    just_once = True
     for idx, result in enumerate(stability_results):
         last_valid_period = -1
         while (result["test_values"][last_valid_period] is None and 
@@ -502,20 +514,22 @@ def plot_results(stability_results):
         
         if result["test_values"][last_valid_period] is not None:
             # Plot actual values
-            ax2.plot(result["test_indices"][last_valid_period], 
-                    result["test_values"][last_valid_period], 
-                    'o-',
-                    linewidth=2,
-                    markersize=6,
-                    color=colors[idx],
-                    label=f'{result["name"]} (Actual)')
+            if just_once:
+                ax2.plot(result["test_indices"][last_valid_period], 
+                        result["test_values"][last_valid_period], 
+                        'o-',
+                        linewidth=4,
+                        markersize=8,
+                        color='black',
+                        label='Actual Values')
+                just_once = False
             
             # Plot predictions with uncertainty band
             y_pred = result["pred_values"][last_valid_period]
             ax2.plot(result["test_indices"][last_valid_period], 
                     y_pred,
                     '--',
-                    linewidth=2,
+                    linewidth=3,
                     color=colors[idx],
                     label=f'{result["name"]} (Predicted)')
             
@@ -546,7 +560,6 @@ def plot_results(stability_results):
     
 
     #### Add computation time analysis
-    print("\nComputation Time Analysis:")
     timing_data = {
         'Model': [],
         'Time (seconds)': [],
@@ -571,41 +584,41 @@ def plot_results(stability_results):
     
     # Create and display timing analysis
     timing_df = pd.DataFrame(timing_data)
-    print("\nComputation Time and Cost Analysis (ml.m5.xlarge):")
+    print("\nComputation Time and Cost Analysis (ml.m5.xlarge):\n")
     print(timing_df.to_string(index=False))
     
-    # Add computation time plot
-    plt.figure(figsize=(12, 6))
-    times = [float(t) for t in timing_df['Time (seconds)'].values]
-    costs = [float(c) for c in timing_df['Est. Cost/365 runs ($)'].values]
+    # # Add computation time plot
+    # plt.figure(figsize=(12, 6))
+    # times = [float(t) for t in timing_df['Time (seconds)'].values]
+    # costs = [float(c) for c in timing_df['Est. Cost/365 runs ($)'].values]
     
-    # Bar plot for computation times
-    plt.subplot(1, 2, 1)
-    bars = plt.bar(timing_df['Model'], times)
-    plt.xticks(rotation=45, ha='right')
-    plt.ylabel('Computation Time (seconds)')
-    plt.title('Model Training Time Comparison')
+    # # Bar plot for computation times
+    # plt.subplot(1, 2, 1)
+    # bars = plt.bar(timing_df['Model'], times)
+    # plt.xticks(rotation=45, ha='right')
+    # plt.ylabel('Computation Time (seconds)')
+    # plt.title('Model Training Time Comparison')
     
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.1f}s',
-                ha='center', va='bottom')
+    # # Add value labels on bars
+    # for bar in bars:
+    #     height = bar.get_height()
+    #     plt.text(bar.get_x() + bar.get_width()/2., height,
+    #             f'{height:.1f}s',
+    #             ha='center', va='bottom')
     
-    # Bar plot for estimated costs
-    plt.subplot(1, 2, 2)
-    bars = plt.bar(timing_df['Model'], costs)
-    plt.xticks(rotation=45, ha='right')
-    plt.ylabel('Estimated Cost per Year runs ($)')
-    plt.title('Cost Projection (AWS SageMaker)')
+    # # Bar plot for estimated costs
+    # plt.subplot(1, 2, 2)
+    # bars = plt.bar(timing_df['Model'], costs)
+    # plt.xticks(rotation=45, ha='right')
+    # plt.ylabel('Estimated Cost per Year runs ($)')
+    # plt.title('Cost Projection (AWS SageMaker)')
     
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                f'${height:.2f}',
-                ha='center', va='bottom')
+    # # Add value labels on bars
+    # for bar in bars:
+    #     height = bar.get_height()
+    #     plt.text(bar.get_x() + bar.get_width()/2., height,
+    #             f'${height:.2f}',
+    #             ha='center', va='bottom')
     
     
     #### Create a third figure for Cost vs MAPE scatter plot
@@ -680,52 +693,7 @@ def plot_results(stability_results):
     summary_df = pd.DataFrame(summary_data)
     print("\n", summary_df.to_string(index=False))
 
-def create_best_ensemble(stability_results, n_best=3):
-    """Create an ensemble from the n best performing models."""
-    # Sort models by mean MAPE (lower is better)
-    sorted_models = sorted(stability_results, key=lambda x: x['mape_mean'])
-    
-    # Get the top n models
-    best_models = sorted_models[:n_best]
-    
-    # Create ensemble components with base forecasters
-    ensemble_components = []
-    for model in best_models:
-        name = model['name'].lower()
-        if name == 'naive':
-            forecaster = NaiveForecaster()
-        elif name == 'autoets':
-            forecaster = AutoETS(sp=7)
-        elif name == 'statsforecastautotheta':
-            forecaster = StatsForecastAutoTheta(season_length=7)
-        elif name == 'polynomialtrend':
-            forecaster = PolynomialTrendForecaster(degree=2)
-        else:
-            continue  # Skip models we can't easily recreate
-            
-        ensemble_components.append((name, forecaster))
-    
-    print("\nCreating ensemble from best models:")
-    for i, model in enumerate(best_models, 1):
-        print(f"{i}. {model['name']} (MAPE: {model['mape_mean']:.2f}%)")
-    
-    # Create the ensemble only if we have components
-    if ensemble_components:
-        ensemble = {
-            "name": f"BestEnsemble_{n_best}",
-            "forecaster": EnsembleForecaster(
-                forecasters=ensemble_components,
-                # selected_forecaster="mean"  # Changed from aggregator to selected_forecaster
-            ),
-            "params": {
-                "deseasonalize__passthrough": [True],
-                "detrend__passthrough": [True],
-            }
-        }
-        return ensemble
-    else:
-        print("Warning: Could not create ensemble - no suitable base models found")
-        return None
+
 
 def save_models(best_models, stability_results, base_path="models"):
     """Save best models, their parameters, and performance metrics."""
@@ -802,7 +770,8 @@ def load_models(run_path):
 
 def main():
     # Step 1: Load data
-    y = create_daily_data()
+    # y = create_daily_data()
+    y = load_series(csv_path='data/transactions.csv', time_col='date', value_col='transactions')
     y_train, y_test = temporal_train_test_split(y, test_size=0.2)
     
     # Step 2: Create model configurations
@@ -813,14 +782,7 @@ def main():
     
     # Step 4: Evaluate stability
     stability_results = evaluate_stability(best_models, y_train)
-
-    # Step 4.5: Create and evaluate best ensemble
-    best_ensemble = create_best_ensemble(stability_results, n_best=3)
-    ensemble_models = find_best_models(y_train, y_test, [best_ensemble])
-    if ensemble_models:
-        ensemble_stability = evaluate_stability(ensemble_models, y_train)
-        stability_results.extend(ensemble_stability)
-    
+   
     # Step 5: Plot and print results
     plot_results(stability_results)
 
