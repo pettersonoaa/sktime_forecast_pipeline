@@ -2,23 +2,21 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-import sys
-import io
-from contextlib import contextmanager
 import joblib
 import os
 from datetime import datetime
 import seaborn as sns
-from sklearn.exceptions import ConvergenceWarning
 import torch
 import torch.nn as nn
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.preprocessing import MinMaxScaler, PowerTransformer, RobustScaler
 from holidays import country_holidays, financial_holidays
 
-from sktime.forecasting.model_selection import temporal_train_test_split, ForecastingGridSearchCV
-from sktime.forecasting.base import ForecastingHorizon
-from sktime.forecasting.compose import AutoEnsembleForecaster, TransformedTargetForecaster, make_reduction
+from sklearn.preprocessing import MinMaxScaler, RobustScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
+
+from sktime.split import SlidingWindowSplitter
+from sktime.utils.plotting import plot_series, plot_windows
+from sktime.performance_metrics.forecasting import mean_absolute_percentage_error
 from sktime.transformations.compose import OptionalPassthrough
 from sktime.transformations.series.adapt import TabularToSeriesAdaptor
 from sktime.transformations.series.detrend import Deseasonalizer, Detrender
@@ -27,50 +25,37 @@ from sktime.transformations.series.boxcox import LogTransformer
 from sktime.transformations.series.holiday import HolidayFeatures
 from sktime.transformations.series.date import DateTimeFeatures
 from sktime.transformations.series.dummies import SeasonalDummiesOneHot
-from sktime.split import SlidingWindowSplitter
-from sktime.utils.plotting import plot_series, plot_windows
-from sktime.performance_metrics.forecasting import mean_absolute_percentage_error
-
-# Import forecasting models
-from sktime.forecasting.naive import NaiveForecaster
-from sktime.forecasting.darts import DartsRegressionModel, DartsXGBModel, DartsLinearRegressionModel
-from sklearn.linear_model import LinearRegression
-from sktime.forecasting.ets import AutoETS
-from sktime.forecasting.statsforecast import StatsForecastAutoARIMA
-from sktime.forecasting.tbats import TBATS
-from sktime.forecasting.trend import PolynomialTrendForecaster
-from sktime.forecasting.statsforecast import StatsForecastAutoTheta
-from sktime.forecasting.fbprophet import Prophet
+from sktime.forecasting.model_selection import temporal_train_test_split, ForecastingGridSearchCV
+from sktime.forecasting.base import ForecastingHorizon
+from sktime.forecasting.compose import AutoEnsembleForecaster, EnsembleForecaster, TransformedTargetForecaster, make_reduction
 from sktime.forecasting.neuralforecast import NeuralForecastLSTM, NeuralForecastTCN
-from sktime.forecasting.compose import make_reduction
-from sklearn.neural_network import MLPRegressor
-from sktime.forecasting.compose import EnsembleForecaster
+from sktime.forecasting.pytorchforecasting import PytorchForecastingTFT, PytorchForecastingNBeats, PytorchForecastingNHiTS, PytorchForecastingDeepAR
+from sktime.forecasting.time_llm import TimeLLMForecaster
+from sktime.forecasting.naive import NaiveForecaster
+from sktime.forecasting.trend import PolynomialTrendForecaster
+from sktime.forecasting.darts import DartsRegressionModel, DartsXGBModel, DartsLinearRegressionModel
+from sktime.forecasting.fbprophet import Prophet
+from sktime.forecasting.statsforecast import (
+    StatsForecastAutoARIMA, 
+    StatsForecastAutoTBATS, 
+    StatsForecastAutoETS, 
+    StatsForecastAutoTheta, 
+    StatsForecastMSTL,
+    StatsForecastAutoCES
+)
 
 import warnings
-# Suppress warnings from TBATS
-warnings.filterwarnings("ignore", message=".*force_all_finite.*", category=FutureWarning)  #RuntimeWarning, UserWarning, FutureWarning
-# Suppress warnings from ARIMA
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+# # Suppress warnings from TBATS
+warnings.filterwarnings("ignore", message=".*Data contains zero.*", category=FutureWarning)  #RuntimeWarning, UserWarning, FutureWarning
+warnings.filterwarnings("ignore", message=".*force_all_finite.*", category=UserWarning)  #RuntimeWarning, UserWarning, FutureWarning
+# # Suppress warnings from ARIMA
 warnings.filterwarnings("ignore", message=".*possible convergence problem.*", category=UserWarning)  #RuntimeWarning, UserWarning, FutureWarning
 
-# internal imports
-# from lstm_forecaster import LSTMForecaster
-
-@contextmanager
-def suppress_stdout_stderr():
-    """Context manager to suppress stdout and stderr."""
-    new_stdout, new_stderr = io.StringIO(), io.StringIO()
-    old_stdout, old_stderr = sys.stdout, sys.stderr
-    try:
-        sys.stdout, sys.stderr = new_stdout, new_stderr
-        yield
-    finally:
-        sys.stdout, sys.stderr = old_stdout, old_stderr
 
 
-def mape_month(y_true, y_pred):
-    y_true = y_true.groupby(y_true.index.month).sum().to_numpy()
-    y_pred = y_pred.groupby(y_pred.index.month).sum().to_numpy()
-    return np.mean(np.abs((y_true - y_pred) / y_true) * 100)
 
 def load_series(csv_path, time_col='date', value_col='value', freq='D'):
     df = pd.read_csv(csv_path, usecols=[time_col, value_col], index_col=0, parse_dates=[time_col])
@@ -79,355 +64,418 @@ def load_series(csv_path, time_col='date', value_col='value', freq='D'):
     series = series.interpolate(method='time')
     return series
 
-def create_model_configs():
+def holidays_features(data, country='BR', horizon_years=5):
+    ch = country_holidays(country, years=list(range(data.index.year.min(), data.index.year.max()+horizon_years)))
+    series = pd.Series(ch)
+    df = pd.DataFrame({'ds': series.index, 'holiday': series.values})
+    df['lower_window'] = -5
+    df['upper_window'] = 5
+    df['ds'] = pd.to_datetime(df['ds'])
+    return df
+
+def mape_metric(y_true, y_pred, month_transform=True):
+    if month_transform:
+        y_true = y_true.groupby(y_true.index.month).sum()
+        y_pred = y_pred.groupby(y_pred.index.month).sum()
+    return np.mean(np.abs((y_true - y_pred) / y_true) * 100)
+
+def create_model_configs(y_train):
     """Step 2: Define models and their parameter grids."""
     return [
+
+        ##  stats family
         {
-            "name": f"Ensemble_Naive",
+            "name": "PTN",
+            "forecaster": PolynomialTrendForecaster(degree=2),  # Quadratic trend
+            "params": {
+                "forecaster__degree": [1, 2, 3],  # Linear, quadratic, cubic
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [False],
+                "deseasonalize_365__passthrough": [False],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "OLS",
+            "forecaster": make_reduction(
+                LinearRegression(),
+                strategy="recursive"
+            ),
+            "params": {
+                "forecaster__window_length": [7, 28, 30, 364, 365],
+                "forecaster__estimator__fit_intercept": [True, False],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
+                "detrend__passthrough": [True, False],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "Theta",
+            "forecaster": StatsForecastAutoTheta(), 
+            "params": {
+                "forecaster__season_length": [7, 28],
+                "forecaster__decomposition_type": ['multiplicative', 'additive'],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "ETS",
+            "forecaster": StatsForecastAutoETS(),
+            "params": {
+                "forecaster__season_length": [7, 28],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "Prophet",
+            "forecaster": Prophet(holidays=holidays_features(y_train)),
+            "params": {
+                "forecaster__uncertainty_samples": [50],
+                "forecaster__changepoint_range": [round(365/int(len(y_train))), 0.8],  # =0.8 Proportion of history in which trend changepoints will be estimated
+                "forecaster__changepoint_prior_scale": [0.03, 0.05, 0.08],  # =0.05 Flexibility of trend - Large values will allow many changepoints, small values will allow few changepoints
+                "forecaster__seasonality_mode": ['multiplicative', 'additive'], # ='additive'
+                "forecaster__seasonality_prior_scale": [6, 10, 12],   # =10 Flexibility of seasonality 
+
+                "scaler__passthrough": [True],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "CES",
+            "forecaster": StatsForecastAutoCES(),
+            "params": {
+                "forecaster__season_length": [7, 28],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "ARIMA",
+            "forecaster": StatsForecastAutoARIMA(),
+            "params": {
+                "forecaster__sp": [7],
+                "forecaster__seasonal": [True],
+                "forecaster__trend": [True],
+                "forecaster__with_intercept": [True],
+                "forecaster__method": ['lbfgs'],
+                "forecaster__stepwise": [True],
+                # "forecaster__trace": [True],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True, False],
+                "deseasonalize_365__passthrough": [True, False],
+                "detrend__passthrough": [True, False],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "TBATS",
+            "forecaster": StatsForecastAutoTBATS(seasonal_periods=7), 
+            "params": {
+                "forecaster__seasonal_periods": [7, 28],
+
+                "scaler__passthrough": [True, False],
+                "deseasonalize_7__passthrough": [True],
+                "deseasonalize_365__passthrough": [True],
+                "detrend__passthrough": [True],
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+        {
+            "name": "Ensemble_Stats",
             "forecaster": AutoEnsembleForecaster(
                 forecasters=[
-                    ('Level', NaiveForecaster(strategy='last')),
-                    ('Drift', NaiveForecaster(strategy='drift')),
-                    ('Seas7', NaiveForecaster(strategy='mean', sp=7, window_length=364)),
-                    ('Seas365', NaiveForecaster(strategy='mean', sp=365)),
+                    ('Prophet', Prophet(holidays=holidays_features(y_train), uncertainty_samples=50, seasonality_mode='multiplicative')),
+                    # ('Theta', StatsForecastAutoTheta(season_length=28, decomposition_type='multiplicative')),
+                    # ('TBATS', StatsForecastAutoTBATS(seasonal_periods=28)),
+                    ('PTN', PolynomialTrendForecaster(degree=3))
                 ],
                 # test_size=0.9,
                 random_state=42,
                 n_jobs=-1
             ),
             "params": {
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
+                "scaler__passthrough": [True, False],
                 "deseasonalize_7__passthrough": [True],
                 "deseasonalize_365__passthrough": [True],
                 "detrend__passthrough": [True],
-                # "ln__passthrough": [False],
-                # "diff__passthrough": [False],
-                # "seas__passthrough": [False],
-                # "holidays__passthrough": [False],
-                # "calendar__passthrough": [False],
-            }
+                "ln__passthrough": [True, False],
+            },
+            "family": 'stats',
+        },
+
+
+
+        ##  deep learning family
+        {
+            'name': 'TCN',
+            'forecaster': NeuralForecastTCN(
+                input_size=365,  # default -1 (all history)
+                local_scaler_type='robust',
+                scaler_type='robust',
+                context_size=7, # default 10
+                decoder_layers=3, # default 2
+                max_steps=1000, # default 1000
+                batch_size=32, # default 32
+                learning_rate=0.01, # default 0.001   between 0 and 1
+                random_seed=42
+            ),
+            "params": {},
+            "family": 'deep learning',
         },
         {
-            "name": "LinearRegression",
-            "forecaster": make_reduction(
-                LinearRegression(),
-                window_length=28,  # 4 weeks of history
-                strategy="recursive"
+            'name': 'LSTM',
+            'forecaster': NeuralForecastLSTM(
+                input_size=365,
+                local_scaler_type='robust',
+                scaler_type='robust',
+                # futr_exog_list=['dayofweek', 'month', 'year'],
+                max_steps=50,
+                batch_size=32,
+                # early_stop_patience_steps=100,
+                # val_check_steps=10,
+                random_seed=42
             ),
-            "params": {
-                "forecaster__estimator__fit_intercept": [True, False],
-                "minmax__passthrough": [True],
-                "scaler__passthrough": [True],
-                "deseasonalize_7__passthrough": [True, False],
-                "deseasonalize_365__passthrough": [True, False],
-                "detrend__passthrough": [True, False],
-            }
+            "params": {},
+            "family": 'deep learning',
         },
-        # {
-        #     "name": "Prophet",
-        #     "forecaster": Prophet(
-        #         seasonality_mode='multiplicative',  # Handle multiplicative seasonality
-        #         uncertainty_samples=1000  # Number of samples for uncertainty intervals
-        #     ),
-        #     "params": {
-        #         "forecaster__changepoint_prior_scale": [0.05, 0.5],  # Flexibility of trend
-        #         "forecaster__seasonality_prior_scale": [0.1, 1.0],   # Flexibility of seasonality
-        #         "forecaster__daily_seasonality": [True, False],
-        #         "forecaster__weekly_seasonality": [True, False],
-        #         "forecaster__yearly_seasonality": [True, False],
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True],         # Let Prophet handle trend
-        #     }
-        # },
-        # {
-        #     "name": "AutoETS",
-        #     "forecaster": AutoETS(),
-        #     "params": {
-        #         "forecaster__sp": [7],
-        #         "forecaster__error": ["add"],
-        #         "forecaster__trend": ["add", None],
-        #         "forecaster__seasonal": ["add", None],
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True],
-        #         "deseasonalize_365__passthrough": [True],
-        #         "detrend__passthrough": [True],
-        #     }
-        # },
-        # {
-        #     "name": "TBATS",
-        #     "forecaster": TBATS(sp=7),  # Weekly seasonality
-        #     "params": {
-        #         "forecaster__use_box_cox": [True, False],
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True],
-        #     }
-        # },
-        # {
-        #     "name": "StatsForecastAutoARIMA",
-        #     "forecaster": StatsForecastAutoARIMA(
-        #         seasonal=True,
-        #         stepwise=True,
-        #         method='lbfgs',  # Use L-BFGS-B optimizer
-        #     ),
-        #     "params": {
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-        # {
-        #     "name": "StatsForecastAutoTheta",
-        ###     "forecaster": StatsForecastAutoTheta(season_length=7),  # Weekly seasonality
-        #     "forecaster": StatsForecastAutoTheta(),  # Weekly seasonality
-        #     "params": {
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-        # {
-        #     "name": "PolynomialTrend",
-        #     "forecaster": PolynomialTrendForecaster(degree=2),  # Quadratic trend
-        #     "params": {
-        #         "forecaster__degree": [1, 2, 3],  # Linear, quadratic, cubic
-        #         "minmax__passthrough": [True],
-        #         "scaler__passthrough": [True],
-        #         "deseasonalize_7__passthrough": [False],
-        #         "deseasonalize_365__passthrough": [False],
-        #         "detrend__passthrough": [True],
-        #     }
-        # },
-        # {
-        #     "name": "NeuralNet",
-        #     "forecaster": make_reduction(
-        #         MLPRegressor(
-        #             # hidden_layer_sizes=(50,),
-        #             max_iter=10000,
-        #             early_stopping=True,
-        #             # batch_size=32,
-        #             random_state=42
-        #         ),
-        #         window_length=28,  # 4 weeks history
-        #         strategy="recursive"
-        #     ),
-        #     "params": {
-        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
-        #         "forecaster__estimator__batch_size": [32, 64],
-        #         "minmax__passthrough": [False],
-        #         "scaler__passthrough": [False],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-        # {
-        #     "name": "TCN",
-        #     "forecaster": make_reduction(
-        #         NeuralForecastTCN(
-        #             input_size=28,  # default -1 (all history)
-        #             context_size=7, # default 10
-        #             decoder_layers=3, # default 2
-        #             max_steps=100, # default 1000
-        #             learning_rate=0.01, # default 0.001   between 0 and 1
-        #             batch_size=32, # default 32
-        #             optimizer="adam", # default "adam"
-        #             random_seed=42
-        #         ),
-        #         window_length=28,  # 4 weeks history
-        #         strategy="recursive"
-        #     ),
-        #     "params": {
-        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
-        #         "forecaster__estimator__batch_size": [32, 64],
-        #         "minmax__passthrough": [False],
-        #         "scaler__passthrough": [False],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-        # {
-        #     "name": "LSTM",
-        #     "forecaster": make_reduction(
-        #         NeuralForecastLSTM(
-        #             input_size=28,  # default -1 (all history)
-        #             context_size=7, # default 10
-        #             encoder_n_layers=3, # default 2
-        #             decoder_layers=3, # default 2
-        #             max_steps=100, # default 1000
-        #             learning_rate=0.01, # default 0.001   between 0 and 1
-        #             batch_size=32, # default 32
-        #             optimizer="adam", # default "adam"
-        #             random_seed=42
-        #         ),
-        #         window_length=28,  # 4 weeks history
-        #         strategy="recursive"
-        #     ),
-        #     "params": {
-        #         "forecaster__estimator__hidden_layer_sizes": [(30,), (50,)],
-        #         "forecaster__estimator__batch_size": [32, 64],
-        #         "minmax__passthrough": [False],
-        #         "scaler__passthrough": [False],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-        # {
-        #     "name": "LSTM",
-        #     "forecaster": make_reduction(
-        #         LSTMForecaster(
-        #             hidden_dim=32,
-        #             num_layers=1,   # Reduced from 2
-        #             n_epochs=25,   # Reduced from 100
-        #             batch_size=64,  # Increased from 32
-        #             random_state=42
-        #         ),
-        #         window_length=28,
-        #         strategy="recursive"
-        #     ),
-        #     "params": {}  # Empty params since we're not doing grid search
-        #     # "params": {
-        #     #     # "forecaster__estimator__hidden_dim": [32, 64],
-        #     #     # "forecaster__estimator__num_layers": [1, 2],
-        #     #     "forecaster__estimator__dropout": [0.1, 0.2],
-        #     #     "minmax__passthrough": [False],
-        #     #     "scaler__passthrough": [False],
-        #     #     "deseasonalize_7__passthrough": [True, False],
-        #     #     "deseasonalize_365__passthrough": [True, False],
-        #     #     "detrend__passthrough": [True, False],
-        #     # }
-        # },
-        # {
-        #     "name": f"Ensemble_ETS_THETA_ARIMA",
-        #     "forecaster": AutoEnsembleForecaster(
-        #         forecasters=[
-        #             ('ETS', AutoETS()),
-        #             ('THETA', StatsForecastAutoTheta()),
-        #             ('ARIMA', StatsForecastAutoARIMA()),
-        #         ],
-        #     ),
-        #     "params": {
-        #         "minmax__passthrough": [True, False],
-        #         "scaler__passthrough": [True, False],
-        #         "deseasonalize_7__passthrough": [True, False],
-        #         "deseasonalize_365__passthrough": [True, False],
-        #         "detrend__passthrough": [True, False],
-        #     }
-        # },
-
+        {
+            'name': 'TimeLLM',
+            'forecaster': TimeLLMForecaster(
+                task_name='long_term_forecast', #  default='long_term_forecast'    'short_term_forecast'
+                pred_len=28+7, # default=24    Forecast horizon - number of time steps to predict.
+                seq_len=96, # default=96     Length of input sequence.
+                llm_model='GPT2', #[‘GPT2’, ‘LLAMA’, ‘BERT’]
+                llm_layers=3, # default=3    Number of transformer layers to use from LLM.
+                patch_len=16, # default=16   Length of patches for patch embedding.
+                stride=8, # default=8        Stride between patches.
+                d_model=128, # default=128   Model dimension.
+                d_ff=128, # default=128      Feed-forward dimension.
+                n_heads=4, # default=4       Number of attention heads.
+                dropout=0.1, # default=0.1    Dropout rate
+                device='cuda' # default='cuda' if available else 'cpu'
+            ),
+            "params": {},
+            "family": 'deep learning',
+        },
+        {
+            'name': 'TFT',
+            'forecaster': PytorchForecastingTFT(
+                trainer_params={
+                    "max_epochs": 50,  # for quick test
+                    "limit_train_batches": 20,  # for quick test
+                }
+            ),
+            "params": {},
+            "family": 'deep learning',
+        },
+        {
+            'name': 'NBeats',
+            'forecaster': PytorchForecastingNBeats(
+                trainer_params={
+                    "max_epochs": 50,  # for quick test
+                    "limit_train_batches": 20,  # for quick test
+                }
+            ),
+            "params": {},
+            "family": 'deep learning',
+        },
+        {
+            'name': 'NHiTS',
+            'forecaster': PytorchForecastingNHiTS(
+                trainer_params={
+                    "max_epochs": 50,  # for quick test
+                    "limit_train_batches": 20,  # for quick test
+                }
+            ),
+            "params": {},
+            "family": 'deep learning',
+        },
+        {
+            'name': 'DeepAR',
+            'forecaster': PytorchForecastingDeepAR(
+                trainer_params={
+                    "max_epochs": 50,  # for quick test
+                    "limit_train_batches": 20,  # for quick test
+                }
+            ),
+            "params": {},
+            "family": 'deep learning',
+        },
+        
     ]
 
 def find_best_models(y_train, y_test, models):
     """Step 3: Find best parameters for each model using grid search."""
     best_models = []
     
+    # Forecast Horizon
+    fh = ForecastingHorizon(y_test.index, is_relative=False)
+
     # Create cross-validation strategy
     cv = SlidingWindowSplitter(
-        initial_window=28*12*3+28*6,    # 2 years training
-        window_length=28*12*3,     # 1 years validation
-        step_length=28*1,        # 1 month step
-        fh=[1, 7, 14, 21, 28, 35]        # Forecast horizons
+        initial_window=28*12*4,    # 4 years training
+        window_length=28*12*3,     # 3 years validation
+        step_length=int(len(y_test)),        # 2 month step
+        fh=list(range(1, int(len(y_test))))
     )
-    # Visualize the CV splits
+    # # Visualize the CV splits
     # fig, ax = plt.subplots(figsize=(10, 6))
     # plt.subplots(figsize=(10, 6))
     # plot_windows(cv, y_train, title="Sliding Window Cross-validation")
+
+    
     
     for model in models:
         print(f"\nEvaluating {model['name']}...")
 
         # Start timing
         start_time = time.time()
-        
-        # Create pipeline
-        pipe = TransformedTargetForecaster([
-            ("ln", OptionalPassthrough(LogTransformer())),
-            # ("diff", OptionalPassthrough(Differencer(na_handling='drop_na'))),
-            ("deseasonalize_7", OptionalPassthrough(Deseasonalizer(sp=7))),
-            ("deseasonalize_365", OptionalPassthrough(Deseasonalizer(sp=365))),
-            ("detrend", OptionalPassthrough(Detrender())),
-            ("scaler", OptionalPassthrough(TabularToSeriesAdaptor(RobustScaler()))),
-            ("minmax", OptionalPassthrough(TabularToSeriesAdaptor(MinMaxScaler((1, 10))))),
-            # ("seas", OptionalPassthrough(SeasonalDummiesOneHot())),
-            # ("holidays", OptionalPassthrough(TabularToSeriesAdaptor(HolidayFeatures(
-            #     calendar=country_holidays(country="BR"),
-            #     holiday_windows={
-            #         "Christmas": (5, 3), 
-            #         "New Year": (2, 5), 
-            #         "Carnival": (3, 3), 
-            #         "Good Friday": (2, 2),
-            #         "Tiradentes' Day": (2, 2),
-            #         "Worker's Day": (2, 2),
-            #         "Independence Day": (2, 2),
-            #         "Our Lady of Aparecida": (2, 2),
-            #         "All Souls' Day": (2, 2),
-            #         "Republic Proclamation Day": (2, 2),
-            #         "National Day of Zumbi and Black Awareness": (2, 2),
-            #     }
-            # )))),
-            # ("calendar", OptionalPassthrough(DateTimeFeatures(ts_freq="D", manual_selection=[
-            #     "month_of_year", 
-            #     "day_of_week", 
-            #     "day_of_month", 
-            #     "week_of_year", 
-            #     "day_of_year", 
-            #     'is_weekend'
-            # ]))),	
-            ("forecaster", model["forecaster"])
-        ])
-        
-        # Perform grid search
-        gscv = ForecastingGridSearchCV(
-            forecaster=pipe,
-            param_grid=[model["params"]],
-            cv=cv,
-            backend="loky",  # Parallel backend
-            backend_params={"n_jobs": -1},  # Number of parallel jobs
-        )
-        
-        try:
-            # fitting 
-            gscv.fit(y_train)
-            y_pred = gscv.predict(ForecastingHorizon(y_test.index, is_relative=False))
+
+        if 'stats' in model['family']:
+            # Create pipeline
+            pipe = TransformedTargetForecaster([
+                ("ln", OptionalPassthrough(LogTransformer())),
+                # ("diff", OptionalPassthrough(Differencer(na_handling='drop_na'))),
+                ("deseasonalize_7", OptionalPassthrough(Deseasonalizer(sp=7))),
+                ("deseasonalize_365", OptionalPassthrough(Deseasonalizer(sp=365))),
+                ("detrend", OptionalPassthrough(Detrender())),
+                ("scaler", OptionalPassthrough(TabularToSeriesAdaptor(RobustScaler()))),
+                # ("seas", OptionalPassthrough(SeasonalDummiesOneHot())),
+                # ("holidays", OptionalPassthrough(TabularToSeriesAdaptor(HolidayFeatures(
+                #     calendar=country_holidays(country="BR"),
+                #     holiday_windows={
+                #         "Christmas": (5, 3), 
+                #         "New Year": (2, 5), 
+                #         "Carnival": (3, 3), 
+                #         "Good Friday": (2, 2),
+                #         "Tiradentes' Day": (2, 2),
+                #         "Worker's Day": (2, 2),
+                #         "Independence Day": (2, 2),
+                #         "Our Lady of Aparecida": (2, 2),
+                #         "All Souls' Day": (2, 2),
+                #         "Republic Proclamation Day": (2, 2),
+                #         "National Day of Zumbi and Black Awareness": (2, 2),
+                #     }
+                # )))),
+                # ("calendar", OptionalPassthrough(DateTimeFeatures(ts_freq="D", manual_selection=[
+                #     "month_of_year", 
+                #     "day_of_week", 
+                #     "day_of_month", 
+                #     "week_of_year", 
+                #     "day_of_year", 
+                #     'is_weekend'
+                # ]))),	
+                ("forecaster", model["forecaster"])
+            ])
             
-            # Add debug print
-            print(f"Model: {model['name']}")
-            print(f"Best parameters: {gscv.best_params_}")
-            print(f"Best score: {gscv.best_score_:.2f}")
-
-            # Calculate computation time
-            computation_time = time.time() - start_time
+            # Perform grid search
+            gscv = ForecastingGridSearchCV(
+                forecaster=pipe,
+                param_grid=[model["params"]],
+                cv=cv,
+                return_n_best_forecasters=3,
+                backend="loky",  # Parallel backend
+                backend_params={"n_jobs": -1},  # Number of parallel jobs
+            )
             
-            # Store best model and timing
-            best_models.append({
-                "name": model["name"],
-                "model": gscv.best_forecaster_,
-                "params": gscv.best_params_,
-                "score": gscv.best_score_,
-                "predictions": y_pred,
-                "computation_time": computation_time
-            })
+            try:
+                # fitting
+                gscv.fit(y=y_train)
+                y_pred = gscv.predict(fh=fh)
 
-            print(f"Computation time: {computation_time:.2f} seconds")
-            # print(f"Computation time: {gscv.get("computation_time", 0):.2f} seconds")
+                best_forecaster = gscv.best_forecaster_
+                best_params = gscv.best_params_
+                # best_score = gscv.best_score_
+                best_score = mape_metric(y_test, y_pred)
+                n_best_score = gscv.n_best_scores_
+                n_best_forecasters = gscv.n_best_forecasters_
+            
+            except Exception as e:
+                print(f"Error with {model['name']}: {str(e)}")
+                computation_time = time.time() - start_time
+                print(f"Failed after: {computation_time:.2f} seconds")
+                continue
+            
 
-        except Exception as e:
-            print(f"Error with {model['name']}: {str(e)}")
-            computation_time = time.time() - start_time
-            print(f"Failed after: {computation_time:.2f} seconds")
+        else:
+            
+
+            try:
+                # fitting
+                model['forecaster'].fit(y=y_train, fh=fh)
+                y_pred = model['forecaster'].predict(fh=fh)
+
+                best_forecaster = model['forecaster']
+                best_params = model['forecaster'].get_fitted_params()
+                best_score = mape_metric(y_test, y_pred)
+                n_best_score = [best_score]
+                n_best_forecasters = [('1', best_params)]
+
+            except Exception as e:
+                print(f"Error with {model['name']}: {str(e)}")
+                computation_time = time.time() - start_time
+                print(f"Failed after: {computation_time:.2f} seconds")
+                continue
+
+
+        # Add debug print
+        print(f"Model: {model['name']}")
+        print(f"Best parameters: {best_params}")
+        print(f"Best score: {best_score:.2f}%")
+        print(f'n Best scores: {n_best_score}')
+        [print(f"{rank_model[0]}# best forecaster: {rank_model[1]}") for rank_model in n_best_forecasters]
+
+        # Calculate computation time
+        computation_time = time.time() - start_time
+        
+        # Store best model and timing
+        best_models.append({
+            "name": model["name"],
+            "model": best_forecaster,
+            "params": best_params,
+            "score": best_score,
+            "test": y_test,
+            "predictions": y_pred,
+            "computation_time": computation_time,
+            "family": model["family"],
+            
+        })
+
+        print(f"Computation time: {computation_time:.2f} seconds")
+        # print(f"Computation time: {gscv.get("computation_time", 0):.2f} seconds")
+
+        
         
     return best_models
 
@@ -450,7 +498,7 @@ def evaluate_stability(best_models, y, periods=6):
         
         for cutoff in cutoffs:
 
-            test_size = 28+7
+            test_size = 7*(4+4+1) # 2 meses (7 dias * (4 semanas + 4 semanas + 1 semana)) = 63 dias
             train_start_date = cutoff - relativedelta(years=3, days=test_size) 
             y_period = y[train_start_date:cutoff]
             train_size = int(len(y_period)) - test_size
@@ -459,9 +507,13 @@ def evaluate_stability(best_models, y, periods=6):
             
             try:
                 # Fit and predict
-                model['model'].fit(y_train)
+                if 'stats' in model['family']:
+                    model['model'].fit(y_train)
+                else:
+                    model['model'].fit(y_train, fh=fh)
+                
                 y_pred = model['model'].predict(fh)
-                mape = mape_month(y_test, y_pred)
+                mape = mape_metric(y_test, y_pred)
                 mape_scores.append(mape)
 
                 # Store actual and predicted values
@@ -490,7 +542,7 @@ def evaluate_stability(best_models, y, periods=6):
     
     return stability_results
 
-def plot_results(stability_results):
+def plot_results(best_models, stability_results):
     """Step 5: Create enhanced visualizations of results."""
     # Set style
     sns.set_style("whitegrid")
@@ -503,7 +555,7 @@ def plot_results(stability_results):
     colors = plt.cm.Set2(np.linspace(0, 1, len(stability_results)))
     
     # Plot 1: Stability over time with enhanced styling
-    ax1 = plt.subplot(2, 1, 1)
+    ax1 = plt.subplot(2, 2, 1)
     periods = range(1, len(stability_results[0]["mape_scores"]) + 1)
     
     for idx, result in enumerate(stability_results):
@@ -530,48 +582,44 @@ def plot_results(stability_results):
     ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     
+
     # Plot 2: Actual vs Predicted with enhanced styling
     ax2 = plt.subplot(2, 1, 2)
-    
+
     just_once = True
-    for idx, result in enumerate(stability_results):
-        last_valid_period = -1
-        while (result["test_values"][last_valid_period] is None and 
-               last_valid_period > -len(result["test_values"])):
-            last_valid_period -= 1
+    for idx, result in enumerate(best_models):
         
-        if result["test_values"][last_valid_period] is not None:
-            # Plot actual values
-            if just_once:
-                ax2.plot(result["test_indices"][last_valid_period], 
-                        result["test_values"][last_valid_period], 
-                        'o-',
-                        linewidth=4,
-                        markersize=8,
-                        color='black',
-                        label='Actual Values')
-                just_once = False
+        # Plot actual values
+        if just_once:
+            ax2.plot(result["test"].index, 
+                    result["test"], 
+                    'o-',
+                    linewidth=4,
+                    markersize=8,
+                    color='black',
+                    label='Actual Values')
+            just_once = False
+        
+        # Plot predictions with uncertainty band
+        y_pred = result["predictions"]
+        ax2.plot(result["test"].index, 
+                y_pred,
+                '--',
+                linewidth=2,
+                color=colors[idx],
+                label=f'{result["name"]} (Predicted)')
+        
+        # Add error bands (using MAPE as uncertainty)
+        mape = result['score'] / 100
+        ax2.fill_between(result["test"].index,
+                        y_pred * (1 - mape),
+                        y_pred * (1 + mape),
+                        color=colors[idx],
+                        alpha=0.2)
             
-            # Plot predictions with uncertainty band
-            y_pred = result["pred_values"][last_valid_period]
-            ax2.plot(result["test_indices"][last_valid_period], 
-                    y_pred,
-                    '--',
-                    linewidth=3,
-                    color=colors[idx],
-                    label=f'{result["name"]} (Predicted)')
-            
-            # Add error bands (using MAPE as uncertainty)
-            mape = result['mape_mean'] / 100
-            ax2.fill_between(result["test_indices"][last_valid_period],
-                           y_pred * (1 - mape),
-                           y_pred * (1 + mape),
-                           color=colors[idx],
-                           alpha=0.2)
-    
     ax2.set_xlabel('Date', fontsize=12)
     ax2.set_ylabel('Value', fontsize=12)
-    ax2.set_title('Actual vs Predicted Values (Last Period)', fontsize=14, pad=20)
+    ax2.set_title('Actual vs Predicted Values', fontsize=14, pad=20)
     ax2.grid(True, linestyle='--', alpha=0.7)
     ax2.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     
@@ -583,6 +631,7 @@ def plot_results(stability_results):
     
     # Add a suptitle
     fig.suptitle('Time Series Forecasting Model Comparison', fontsize=16, y=1.02)
+    
     
 
     #### Add computation time analysis
@@ -648,51 +697,53 @@ def plot_results(stability_results):
     
     
     #### Create a third figure for Cost vs MAPE scatter plot
-    plt.figure(figsize=(10, 8))
+    # plt.figure(figsize=(17, 9), dpi=90)
+    # fig3 = plt.figure(figsize=(14, 8), dpi=90)
+    # fig3, ax3 = plt.subplots(1, 1)
+    ax3 = plt.subplot(2, 2, 2)
     
     # Extract data for scatter plot
     costs = []
     mapes = []
     names = []
-    for result in stability_results:
+    color = []
+    for idx, result in enumerate(stability_results):
+    # for result in stability_results:
         computation_time = result.get('computation_time', 0)
         estimated_cost = ((computation_time + setup_time) * SAGEMAKER_COST_PER_SECOND * 365)
         costs.append(estimated_cost)
-        mapes.append(result['mape_mean'])
+        mapes.append(100-result['mape_mean']-result['mape_std'])
         names.append(result['name'])
+        color.append(colors[idx])
     
     # Create scatter plot
-    plt.scatter(mapes, costs, s=100)
+    ax3.scatter(costs, mapes, c=color, s=100)
     
     # Add labels for each point
-    for i, name in enumerate(names):
-        plt.annotate(name, 
-                    (mapes[i], costs[i]),
+    for idx, name in enumerate(names):
+        ax3.annotate(name, 
+                    (costs[idx], mapes[idx]),
                     xytext=(5, 5),
                     textcoords='offset points',
                     fontsize=10,
-                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
+                    color=colors[idx],
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.01))
     
-    # Add labels and title
-    plt.xlabel('Mean MAPE (%)', fontsize=12)
-    plt.ylabel('Estimated Annual Cost ($)', fontsize=12)
-    plt.title('Cost-Performance Trade-off Analysis', fontsize=14)
+    ax3.set_xlabel('Estimated Annual Cost ($)', fontsize=12)
+    ax3.set_ylabel('Performance [100% - mean(MAPE) - std(MAPE)] (%)', fontsize=12)
+    ax3.set_title('Performance-Cost Trade-off', fontsize=14, pad=20)
+    ax3.grid(True, linestyle='--', alpha=0.7)
     
-    # Add grid
-    plt.grid(True, linestyle='--', alpha=0.7)
-    
-    # Add a diagonal line to show the trade-off frontier
-    min_mape = min(mapes)
-    max_mape = max(mapes)
-    min_cost = min(costs)
-    max_cost = max(costs)
-    
+
+    # set x axis to log
+    ax3.set_xscale('log')
+   
     # Normalize and plot reference line
-    plt.plot([min_mape, max_mape], [min_cost, max_cost], 
+    ax3.plot([min(costs), max(costs)], [min(mapes), max(mapes)], 
              'r--', alpha=0.3, label='Trade-off Reference')
     
     # Add legend
-    plt.legend()
+    ax3.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     
     # Adjust layout
     plt.tight_layout()
@@ -798,19 +849,19 @@ def main():
     # Step 1: Load data
     # y = create_daily_data()
     y = load_series(csv_path='data/transactions.csv', time_col='date', value_col='transactions')
-    y_train, y_test = temporal_train_test_split(y, test_size=0.2)
+    y_train, y_test = temporal_train_test_split(y, test_size=7*(4+4+1))
     
     # Step 2: Create model configurations
-    models = create_model_configs()
+    models = create_model_configs(y_train)
     
     # Step 3: Find best models
     best_models = find_best_models(y_train, y_test, models)
     
     # Step 4: Evaluate stability
-    stability_results = evaluate_stability(best_models, y_train)
+    stability_results = evaluate_stability(best_models, y_train, periods=2)
    
     # Step 5: Plot and print results
-    plot_results(stability_results)
+    plot_results(best_models, stability_results)
 
     # Step 6: Save models and results
     run_path = save_models(best_models, stability_results)
